@@ -1,7 +1,8 @@
 import numpy as np
+import pickle
 from typing import Dict, List, Tuple
 from training_data import TRAINING_DATA
-from constants import XAVIER_MULTIPLIER, XAVIER_MUTLITPLIER_2, EMBEDDING_INIT_SCALE, EMBEDDING_INIT_BIAS, QKV_INIT_SCALE, OUTPUT_INIT_SCALE, FF_INIT_SCALE, GRADIENT_CLIP_VALUE, ADAM_BETA1, ADAM_BETA2, ADAM_EPSILON, SURROGATE_CLIP_VALUE, SURROGATE_BETA, SPIKE_THRESH_EMBEDDING, SPIKE_THRESH_Q, SPIKE_THRESH_K, SPIKE_THRESH_V, SPIKE_THRESH_ATTN, SPIKE_THRESH_FF1, SPIKE_THRESH_FF2, FORWARD_MEMBRANE_CLIP_THRE, LEARNING_RATE, D_MODEL, N_HEADS, N_LAYERS, D_FF, TIMESTEPS, SHUFFLE_DATA, EPOCHS, LOG_INTERVAL, DECAY_FACTOR, RESET_VALUE
+from constants import XAVIER_MULTIPLIER, XAVIER_MUTLITPLIER_2, EMBEDDING_INIT_SCALE, EMBEDDING_INIT_BIAS, QKV_INIT_SCALE, OUTPUT_INIT_SCALE, FF_INIT_SCALE, GRADIENT_CLIP_VALUE, ADAM_BETA1, ADAM_BETA2, ADAM_EPSILON, SURROGATE_CLIP_VALUE, SURROGATE_BETA, SPIKE_THRESH_EMBEDDING, SPIKE_THRESH_Q, SPIKE_THRESH_K, SPIKE_THRESH_V, SPIKE_THRESH_ATTN, SPIKE_THRESH_FF1, SPIKE_THRESH_FF2, FORWARD_MEMBRANE_CLIP_THRE, LEARNING_RATE, D_MODEL, N_HEADS, N_LAYERS, D_FF, TIMESTEPS, SHUFFLE_DATA, EPOCHS, LOG_INTERVAL, DECAY_FACTOR, RESET_VALUE, MAX_SEQ_LEN, SAVE_FILEPATH, TRAIN_MODEL
 
 class SpikingNeuronLayer:
     """Leaky Integrate-and-Fire (LIF) spiking neuron layer"""
@@ -34,7 +35,7 @@ class SpikeTransformer:
                  n_heads: int = 4,
                  n_layers: int = 2,
                  d_ff: int = 256,
-                 learning_rate: float = LEARNING_RATE,
+                 learning_rate: float = 0.001,
                  timesteps: int = 4):
         
         self.max_seq_len = max_seq_len
@@ -705,6 +706,89 @@ class SpikeTransformer:
         
         print("\nTraining complete!")
 
+        metrics = dict()
+        metrics['performance'] = {
+            'avg_loss': avg_loss,
+            'accuracy': accuracy,
+            'avg_spike_rate': avg_spike_rate
+        }
+        metrics['training_config'] = {
+            'epochs': epochs,
+            'shuffle_data': SHUFFLE_DATA,
+            'log_interval': LOG_INTERVAL,
+            'initial_learning_rate': LEARNING_RATE,
+        }
+        self.save_model(metrics)
+
+    def save_model(self, training_metrics: dict = None):
+        model_state = {
+            'model_version': '1.0',
+            'architecture': {
+                'max_seq_len': self.max_seq_len,
+                'd_model': self.d_model,
+                'n_heads': self.n_heads,
+                'n_layers': self.n_layers,
+                'd_ff': self.d_ff,
+                'd_k': self.d_k,
+                'timesteps': self.timesteps,
+                'vocab_size': self.vocab_size,
+            },
+            'hyperparameters': {
+                'learning_rate': self.learning_rate,
+                'decay_factor': DECAY_FACTOR,
+                'reset_value': RESET_VALUE,
+                'adam_beta1': ADAM_BETA1,
+                'adam_beta2': ADAM_BETA2,
+                'adam_epsilon': ADAM_EPSILON,
+                'gradient_clip_value': GRADIENT_CLIP_VALUE,
+                'surrogate_beta': SURROGATE_BETA,
+                'surrogate_clip_value': SURROGATE_CLIP_VALUE,
+            },
+            'spike_thresholds': {
+                'embedding': SPIKE_THRESH_EMBEDDING,
+                'q': SPIKE_THRESH_Q,
+                'k': SPIKE_THRESH_K,
+                'v': SPIKE_THRESH_V,
+                'attn': SPIKE_THRESH_ATTN,
+                'ff1': SPIKE_THRESH_FF1,
+                'ff2': SPIKE_THRESH_FF2,
+            },
+            'init_scales': {
+                'xavier_multiplier': XAVIER_MULTIPLIER,
+                'xavier_multiplier_2': XAVIER_MUTLITPLIER_2,
+                'embedding_init_scale': EMBEDDING_INIT_SCALE,
+                'embedding_init_bias': EMBEDDING_INIT_BIAS,
+                'qkv_init_scale': QKV_INIT_SCALE,
+                'output_init_scale': OUTPUT_INIT_SCALE,
+                'ff_init_scale': FF_INIT_SCALE,
+            },
+            'weights': {
+                'embedding': self.embedding,
+                'pos_encoding': self.pos_encoding,
+                'W_out': self.W_out,
+                'b_out': self.b_out,
+            },
+            'layers': self.layers,
+            'optimizer': {
+                'adam_m': self.adam_m,
+                'adam_v': self.adam_v,
+                'adam_t': self.adam_t,
+            },
+            'vocabularies': {
+                'char_to_idx': self.char_to_idx,
+                'colors': self.colors,
+                'color_to_idx': self.color_to_idx,
+            },
+            'training_data': self.training_data,
+        }
+        
+        if training_metrics:
+            model_state['training_metrics'] = training_metrics
+        with open(f"{SAVE_FILEPATH}.pkl", 'wb') as f:
+            pickle.dump(model_state, f)
+        
+        print(f"Model saved to {SAVE_FILEPATH}.pkl")
+
     def analyze_efficiency(self):
         """Analyze the efficiency of spike-driven computation"""
         print("\n" + "="*60)
@@ -764,40 +848,102 @@ class SpikeTransformer:
         print(f"\nGeneralization accuracy: {correct}/{len(test_words)} ({accuracy:.1f}%)")
         print(f"Average spike rate: {avg_spike_rate:.3f}")
 
+    @classmethod
+    def load_model(cls, filepath: str):
+        """Load a saved spike transformer model"""
+        with open(filepath, 'rb') as f:
+            state = pickle.load(f)
+        
+        # Create new instance with saved architecture
+        arch = state['architecture']
+        model = cls(
+            max_seq_len=arch['max_seq_len'],
+            d_model=arch['d_model'],
+            n_heads=arch['n_heads'],
+            n_layers=arch['n_layers'],
+            d_ff=arch['d_ff'],
+            timesteps=arch['timesteps'],
+            learning_rate=state['hyperparameters']['learning_rate']
+        )
+        
+        # Restore weights
+        model.embedding = state['weights']['embedding']
+        model.pos_encoding = state['weights']['pos_encoding']
+        model.W_out = state['weights']['W_out']
+        model.b_out = state['weights']['b_out']
+        model.layers = state['layers']
+        
+        # Restore optimizer states
+        model.adam_m = state['optimizer']['adam_m']
+        model.adam_v = state['optimizer']['adam_v']
+        model.adam_t = state['optimizer']['adam_t']
+        
+        # Restore vocabularies
+        model.char_to_idx = state['vocabularies']['char_to_idx']
+        model.colors = state['vocabularies']['colors']
+        model.color_to_idx = state['vocabularies']['color_to_idx']
+        model.vocab_size = len(model.char_to_idx)
+        
+        # Restore training data
+        model.training_data = state['training_data']
+        
+        # Restore spike layers with correct thresholds
+        thresholds = state['spike_thresholds']
+        model.spike_layers['embedding'] = SpikingNeuronLayer(threshold=thresholds['embedding'])
+        
+        for i in range(model.n_layers):
+            model.spike_layers[f'layer_{i}_q'] = SpikingNeuronLayer(threshold=thresholds['q'])
+            model.spike_layers[f'layer_{i}_k'] = SpikingNeuronLayer(threshold=thresholds['k'])
+            model.spike_layers[f'layer_{i}_v'] = SpikingNeuronLayer(threshold=thresholds['v'])
+            model.spike_layers[f'layer_{i}_attn'] = SpikingNeuronLayer(threshold=thresholds['attn'])
+            model.spike_layers[f'layer_{i}_ff1'] = SpikingNeuronLayer(threshold=thresholds['ff1'])
+            model.spike_layers[f'layer_{i}_ff2'] = SpikingNeuronLayer(threshold=thresholds['ff2'])
+        
+        # Set decay factor and reset value for all spike layers
+        for layer in model.spike_layers.values():
+            layer.decay_factor = state['hyperparameters']['decay_factor']
+            layer.reset_value = state['hyperparameters']['reset_value']
+        
+        print(f"Model loaded from {filepath}")
+        return model
 
 if __name__ == "__main__":
     print("Spike-driven Transformer from scratch using only Numpy\n")
     
-    model = SpikeTransformer(
-        d_model=D_MODEL,
-        n_heads=N_HEADS,
-        n_layers=N_LAYERS,
-        d_ff=D_FF,
-        timesteps=TIMESTEPS,
-        learning_rate=LEARNING_RATE
-    )
-    
-    print("\n" + "="*60)
-    print("Before training (random initialization):")
-    test_words = ["water", "fire", "grass", "night", "sunshine"]
-    for word in test_words:
-        color, probs = model.predict(word)
-        print(f"  {word:10} -> {color:8} ({np.max(probs)*100:.1f}%)")
+    if TRAIN_MODEL:
+        model = SpikeTransformer(
+            max_seq_len=MAX_SEQ_LEN,
+            d_model=D_MODEL,
+            n_heads=N_HEADS,
+            n_layers=N_LAYERS,
+            d_ff=D_FF,
+            timesteps=TIMESTEPS,
+            learning_rate=LEARNING_RATE
+        )
+        
+        print("\n" + "="*60)
+        print("Before training (random initialization):")
+        test_words = ["water", "fire", "grass", "night", "sunshine"]
+        for word in test_words:
+            color, probs = model.predict(word)
+            print(f"  {word:10} -> {color:8} ({np.max(probs)*100:.1f}%)")
 
-    print("\n" + "="*60)
-    model.train(epochs=EPOCHS)
-    
-    print("\n" + "="*60)
-    print("Performance on TRAINING words:")
-    print("="*60)
-    for word in ["ocean", "cherry", "forest", "banana", "snow", "midnight"]:
-        pred, probs = model.predict(word)
-        conf = np.max(probs) * 100
-        true = model.training_data.get(word, "?")
-        print(f"{word:10} -> {pred:8} ({conf:4.1f}%) [True: {true}]")
-    
-    model.test_generalization()
-    model.analyze_efficiency()
+        print("\n" + "="*60)
+        model.train(epochs=EPOCHS)
+        
+        print("\n" + "="*60)
+        print("Performance on TRAINING words:")
+        print("="*60)
+        for word in ["ocean", "cherry", "forest", "banana", "snow", "midnight"]:
+            pred, probs = model.predict(word)
+            conf = np.max(probs) * 100
+            true = model.training_data.get(word, "?")
+            print(f"{word:10} -> {pred:8} ({conf:4.1f}%) [True: {true}]")
+        
+        model.test_generalization()
+        model.analyze_efficiency()
+    else:
+        model = SpikeTransformer.load_model(SAVE_FILEPATH)
 
     while True:
         word = input("\nEnter a word (or 'quit'): ").strip()
