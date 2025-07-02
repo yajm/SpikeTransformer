@@ -8,6 +8,10 @@ A from-scratch implementation of Spike-driven Transformers using only NumPy.
 - [Spike-driven Transformer](https://arxiv.org/pdf/2307.01694) - First spike-based transformer
 - [Spike-driven Transformer V2](https://arxiv.org/pdf/2404.03663) - Improved architecture
 - [Scaling Spike-driven Transformer](https://arxiv.org/pdf/2411.16061v1) - Scaling techniques
+- [Spike-HAR++: an energy-efficient and lightweight parallel spiking transformer](https://pmc.ncbi.nlm.nih.gov/articles/PMC11628275/pdf/fncom-18-1508297.pdf)
+- [SpikeGPT: Generative Pre-trained Language Model
+  with Spiking Neural Networks](https://arxiv.org/pdf/2302.13939)
+- [SpikeLLM: Scaling up Spiking Neural Network to Large Language Models via Saliency-based Spiking](https://arxiv.org/pdf/2407.04752)
 
 ## Objective:
 
