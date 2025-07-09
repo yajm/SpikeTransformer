@@ -1,6 +1,6 @@
 # Spike Transformer
 
-A from-scratch implementation of Spike-driven Transformers using only NumPy.
+A from-scratch implementation of Spike-driven Transformers using only NumPy & MLX.
 
 ## Inspired by the following Papers
 
@@ -12,6 +12,10 @@ A from-scratch implementation of Spike-driven Transformers using only NumPy.
 - [SpikeGPT: Generative Pre-trained Language Model
   with Spiking Neural Networks](https://arxiv.org/pdf/2302.13939)
 - [SpikeLLM: Scaling up Spiking Neural Network to Large Language Models via Saliency-based Spiking](https://arxiv.org/pdf/2407.04752)
+- [Metadata Conditioning Accelerates Language
+  Model Pre-training](https://arxiv.org/pdf/2501.01956v2)
+- [Artificial Neurons Based on Ag/V2C/W Threshold
+  Switching Memristors](https://pmc.ncbi.nlm.nih.gov/articles/PMC8623555/pdf/nanomaterials-11-02860.pdf)
 
 ## Objective:
 
@@ -20,7 +24,7 @@ Impressive Spike Transformers demo maximizing accuracy given the following const
 ## Contraints:
 
 - Keep everything simple and easy to understand
-- No external libraries except numpy.
+- No external libraries except NumPy & MLX.
 - Keep the implementation below 1000 lines
 - Keep the training data less tha 1000 examples
 
@@ -29,6 +33,31 @@ Impressive Spike Transformers demo maximizing accuracy given the following const
 ```bash
 python3 SpikeTransformer
 ```
+
+## Roadmap
+
+1. Scraper
+2. Tokenizer
+3. SpikeLLM
+4. Implemenent MLX support for the M1 chip
+5. Instruction Tuning
+6. RLHF
+7. Fine-tuning
+8. Streaming
+9. Reasoning Model
+
+## ToDo
+
+- increase context window
+- increase training chunk per episode
+- remove all chunks with <UNK>
+- remove all chunks with sex or porn
+- add retrieval id per generation
+- maybe category id?
+- change to float 8
+- implement MLX
+- remove all instruction tuning examples with UNK
+- remove all instructino tuning examples question and answer above 128, 96, 64?
 
 ## High Score
 

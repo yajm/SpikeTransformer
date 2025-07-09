@@ -7,6 +7,10 @@ import os
 from tqdm import tqdm
 import pickle
 import gc
+import os
+
+from tokenizer import SmartNgramTokenizer
+from tokenizer2 import SyllableTokenizer
 
 class SpikingNeuronLayer:
     """Leaky Integrate-and-Fire (LIF) spiking neuron layer"""
@@ -34,36 +38,52 @@ class SpikingNeuronLayer:
 class WikipediaDataLoader:
     """Handles loading and preprocessing of Wikipedia articles"""
     
-    def __init__(self, json_path: str, max_article_length: int = 10000, 
-                 chunk_size: int = 512, overlap: int = 64):
-        self.json_path = json_path
+    def __init__(self, data_folder: str, max_article_length: int = 10000, 
+                 chunk_size: int = 512, overlap: int = 64, tokenizer=None):
+        self.data_folder = data_folder
         self.max_article_length = max_article_length
         self.chunk_size = chunk_size
         self.overlap = overlap
         self.articles = []
         self.chunks = []
+        self.tokenizer = tokenizer
         
     def load_articles(self):
-        """Load articles from JSON file"""
-        print(f"Loading Wikipedia articles from {self.json_path}")
-        with open(self.json_path, 'r', encoding='utf-8') as f:
-            data = json.load(f)
+        """Load articles from all JSON files in the folder"""
         
-        # Extract content from each article
-        for article in tqdm(data, desc="Processing articles"):
-            if 'content' in article and article['content']:
-                # Take only first max_article_length characters to manage memory
-                content = article['content'][:self.max_article_length]
-                self.articles.append({
-                    'title': article.get('title', 'Unknown'),
-                    'content': content
-                })
+        json_files = [f for f in os.listdir(self.data_folder) if f.endswith('.json')]
+        print(f"Loading Wikipedia articles from {len(json_files)} files in {self.data_folder}")
         
-        print(f"Loaded {len(self.articles)} articles")
+        total_articles = 0
+        for json_file in tqdm(json_files, desc="Loading files"):
+            file_path = os.path.join(self.data_folder, json_file)
+            
+            with open(file_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            
+            # Extract content from each article
+            for article in data:
+                if 'content' in article and article['content']:
+                    # Take only first max_article_length characters to manage memory
+                    content = article['content'][:self.max_article_length]
+                    self.articles.append({
+                        'title': article.get('title', 'Unknown'),
+                        'content': content
+                    })
+                    total_articles += 1
+        
+        print(f"Loaded {total_articles} articles from {len(json_files)} files")
         
     def create_chunks(self):
-        """Split articles into overlapping chunks for training"""
+        """Split articles into overlapping chunks for training, filtering out chunks with UNK tokens"""
         print("Creating training chunks...")
+        
+        if self.tokenizer is None:
+            print("Warning: No tokenizer provided, cannot filter UNK tokens during chunk creation")
+            
+        total_chunks = 0
+        filtered_chunks = 0
+        total_unk_count = 0
         
         for article in tqdm(self.articles, desc="Chunking articles"):
             content = article['content']
@@ -76,10 +96,44 @@ class WikipediaDataLoader:
             for i in range(0, len(content) - self.chunk_size + 1, self.chunk_size - self.overlap):
                 chunk = content[i:i + self.chunk_size]
                 if len(chunk) >= 100:  # Minimum chunk size
-                    self.chunks.append(chunk)
-        
+                    total_chunks += 1
+                    
+                    # OPTION 1: Clean the chunk before adding it
+                    if self.tokenizer is not None:
+                        # Get valid characters from tokenizer vocabulary
+
+                        tokens = self.tokenizer.tokenize(chunk)
+                        
+                        total_unk_count += tokens.count(3)
+                        
+                        valid_chars = set()
+                        for token in self.tokenizer.vocab:
+                            if len(token) == 1:  # Single character tokens
+                                valid_chars.add(token)
+                        
+                        # Always keep space and newline
+                        valid_chars.add(' ')
+                        valid_chars.add('\n')
+                        
+                        # Clean the chunk - remove invalid characters
+                        cleaned_chunk = ''.join(char for char in chunk if char.lower() in valid_chars or char.isupper() and char.lower() in valid_chars)
+                        
+                        # Skip if chunk becomes too short after cleaning
+                        if len(cleaned_chunk.strip()) < 50:
+                            filtered_chunks += 1
+                            continue
+                        
+                        # Add the CLEANED chunk
+                        self.chunks.append(cleaned_chunk)
+                    else:
+                        # No tokenizer, add raw chunk
+                        self.chunks.append(chunk)
+
+        print("Total Unk count", total_unk_count)
         print(f"Created {len(self.chunks)} training chunks")
-        
+        if self.tokenizer is not None:
+            print(f"Filtered out {filtered_chunks} chunks that were too short after cleaning ({filtered_chunks/total_chunks*100:.1f}%)")
+            
     def get_training_chunks(self, num_chunks: int = None):
         """Get training chunks, optionally limiting the number"""
         if num_chunks:
@@ -87,7 +141,7 @@ class WikipediaDataLoader:
         return self.chunks
 
 class SpikeLLM():  
-    def __init__(self, ): 
+    def __init__(self, tokenizer = None): 
         self.d_model = D_MODEL
         self.n_heads = N_HEADS
         self.n_layers = N_LAYERS
@@ -95,6 +149,13 @@ class SpikeLLM():
         self.max_seq_len = MAX_SEQ_LEN
         self.timesteps = TIMESTEPS
         self.learning_rate = LEARNING_RATE
+        self.tokenizer = tokenizer
+        self.vocab = self.tokenizer.vocab
+        self.vocab_size = max(self.tokenizer.id_to_vocab.keys()) + 1
+        self.token_to_idx = self.tokenizer.vocab_to_id
+        self.idx_to_token = self.tokenizer.id_to_vocab
+    
+        print(f"Tokenizer initialized with vocabulary size: {self.vocab_size}")
         
         # Initialize transformer layers
         self.layers = []
@@ -130,30 +191,7 @@ class SpikeLLM():
             'loss': [],
             'perplexity': []
         }
-
-        self.vocab = [
-            '<PAD>',    # 0
-            '<START>',  # 1 
-            '<END>',    # 2
-            '<UNK>',    # 3
-            '<CAP>',    # 4 - Capitalization marker
-            ' ',        # 5 - Space
-            '\n',       # 6 - Newline
-            # Lowercase letters by frequency (26 chars)
-            'e', 't', 'a', 'o', 'i', 'n', 's', 'h', 'r', 'd', 'l', 'c', 'u', 'm', 
-            'f', 'p', 'g', 'w', 'y', 'b', 'v', 'k', 'x', 'z', 'j', 'q',
-            # Numbers
-            '0', '1', '2', '3', '4', '5', '6', '7', '8', '9',
-            # Essential punctuation
-            '.', ',', "'", '-', ':', '(', ')', ';', '!', '"',
-            # Special chars
-            '@', '#', '$', '%', '&', '*', '+', '=', '_'
-        ]
-        
-        self.vocab_size = len(self.vocab)
-        self.char_to_idx = {char: idx for idx, char in enumerate(self.vocab)}
-        self.idx_to_char = {idx: char for idx, char in enumerate(self.vocab)}
-        
+ 
         # Re-initialize weights for new vocab size
         self.embedding = self._xavier_init(self.vocab_size, self.d_model) * EMBEDDING_INIT_SCALE
         self.embedding += EMBEDDING_INIT_BIAS
@@ -162,6 +200,94 @@ class SpikeLLM():
         
         # Re-initialize optimizer states for new parameters
         self._init_optimizer_states()
+
+    def encode(self, input_ids: np.ndarray) -> np.ndarray:
+        """
+        Extract embeddings from text chunks
+        
+        Args:
+            input_ids: Token indices [batch_size, seq_len]
+            
+        Returns:
+            embeddings: [batch_size, d_model] normalized embeddings
+        """
+        batch_size, seq_len = input_ids.shape
+        
+        # Accumulator for multi-timestep outputs
+        output_accumulator = None
+        
+        for t in range(self.timesteps):
+            # Embedding lookup + positional encoding
+            x_embed = self.embedding[input_ids]
+            x_embed = x_embed + self.pos_encoding[:seq_len, :]
+            
+            # Convert to spikes
+            embed_spikes, embed_membrane = self.spike_layers['embedding'].forward(x_embed, t)
+            
+            # Process through transformer layers
+            layer_membrane = embed_membrane
+            for i, layer in enumerate(self.layers):
+                layer_membrane = self.spike_transformer_block(
+                    layer_membrane, layer, i, t, activations=None
+                )
+            
+            # Accumulate outputs
+            if output_accumulator is None:
+                output_accumulator = layer_membrane
+            else:
+                output_accumulator += layer_membrane
+        
+        # Average over timesteps
+        final_output = output_accumulator / self.timesteps
+        
+        # Mean pooling over sequence (ignoring padding)
+        pad_token_id = self.token_to_idx['<PAD>']
+        embeddings = []
+        
+        for b in range(batch_size):
+            # Create mask for non-padding tokens
+            mask = (input_ids[b] != pad_token_id).astype(np.float32)
+            valid_positions = np.sum(mask)
+            
+            if valid_positions > 0:
+                # Weighted mean (only non-padding positions)
+                masked_output = final_output[b] * mask[:, np.newaxis]
+                embedding = np.sum(masked_output, axis=0) / valid_positions
+            else:
+                # Fallback if all padding
+                embedding = np.mean(final_output[b], axis=0)
+            
+            # L2 normalize
+            embedding = embedding / (np.linalg.norm(embedding) + 1e-8)
+            embeddings.append(embedding)
+        
+        return np.array(embeddings)
+
+    def get_text_embedding(self, text: str) -> np.ndarray:
+        """
+        Get embedding for a single text
+        
+        Args:
+            text: Input text string
+            
+        Returns:
+            embedding: [d_model] normalized embedding vector
+        """
+        # Tokenize
+        tokens = [self.token_to_idx['<START>']]
+        tokens += self.preprocess_text(text[:self.max_seq_len-2])
+        tokens += [self.token_to_idx['<END>']]
+        
+        # Pad
+        while len(tokens) < self.max_seq_len:
+            tokens.append(self.token_to_idx['<PAD>'])
+        tokens = tokens[:self.max_seq_len]
+        
+        # Get embedding
+        input_ids = np.array([tokens])
+        embedding = self.encode(input_ids)
+        
+        return embedding[0]  # Return single embedding
 
     def _init_optimizer_states(self):
         """Initialize Adam optimizer states"""
@@ -259,11 +385,6 @@ class SpikeLLM():
         var = np.var(x, axis=-1, keepdims=True)
         x_norm = (x - mean) / np.sqrt(var + eps)
         return gamma * x_norm + beta
-        
-    def create_causal_mask(self, seq_len: int) -> np.ndarray:
-        """Create causal attention mask to prevent attending to future positions"""
-        mask = np.tril(np.ones((seq_len, seq_len)))
-        return mask
     
     def forward(self, input_ids: np.ndarray, target_ids: np.ndarray = None, return_activations: bool = False):
         """
@@ -348,9 +469,10 @@ class SpikeLLM():
             probs[:, i, :] = self.softmax(logits[:, i, :], axis=-1)
         
         # Cross-entropy loss
+        pad_token_id = self.token_to_idx['<PAD>']
         for b in range(batch_size):
             for i in range(seq_len):
-                if target_ids[b, i] != self.char_to_idx['<PAD>']:
+                if target_ids[b, i] != pad_token_id:
                     total_loss -= np.log(probs[b, i, target_ids[b, i]] + 1e-10)
                     n_valid_tokens += 1
         
@@ -383,58 +505,54 @@ class SpikeLLM():
         x_membrane = self.layer_norm(x_membrane, layer['ln2_gamma'], layer['ln2_beta'])
         
         return x_membrane
-    
+
     def spike_driven_self_attention(self, x: np.ndarray, layer: Dict, layer_idx: int,
-                                        timestep: int, activations: Dict = None):
+                               timestep: int, activations: Dict = None):
+        batch_size, seq_len, _ = x.shape
+        
         # Generate Q, K, V
         Q_membrane = np.matmul(x, layer['W_q'])
         K_membrane = np.matmul(x, layer['W_k'])
         V_membrane = np.matmul(x, layer['W_v'])
-        
-        if activations is not None:
-            activations[f'layer_{layer_idx}_Q_membrane'] = Q_membrane.copy()
-            activations[f'layer_{layer_idx}_K_membrane'] = K_membrane.copy()
-            activations[f'layer_{layer_idx}_V_membrane'] = V_membrane.copy()
         
         # Convert to spikes
         Q_spikes, _ = self.spike_layers[f'layer_{layer_idx}_q'].forward(Q_membrane, timestep)
         K_spikes, _ = self.spike_layers[f'layer_{layer_idx}_k'].forward(K_membrane, timestep)
         V_spikes, _ = self.spike_layers[f'layer_{layer_idx}_v'].forward(V_membrane, timestep)
         
+        # Pre-allocate arrays for efficiency
         if activations is not None:
-            activations[f'layer_{layer_idx}_Q_spikes'] = Q_spikes.copy()
-            activations[f'layer_{layer_idx}_K_spikes'] = K_spikes.copy()
-            activations[f'layer_{layer_idx}_V_spikes'] = V_spikes.copy()
+            # Pre-allocate storage for cumulative states
+            cumulative_kv_states = np.zeros((seq_len, batch_size, self.d_model))
+            attn_outputs = np.zeros((seq_len, batch_size, self.d_model))
         
-        # Spike-driven attention with causal mask
-        KV_hadamard = K_spikes * V_spikes  # [batch, seq_len, d_model]
+        # Linear attention with causal masking
+        cumulative_kv = np.zeros((batch_size, self.d_model))
+        output = np.zeros_like(x)
         
-        # Apply causal mask before summing
-        KV_hadamard_masked = KV_hadamard
-        
-        
-        if activations is not None:
-            activations[f'layer_{layer_idx}_KV_hadamard'] = KV_hadamard.copy()
-            activations[f'layer_{layer_idx}_KV_hadamard_masked'] = KV_hadamard_masked.copy()
-        
-        KV_sum = np.sum(KV_hadamard_masked, axis=1, keepdims=True)  # [batch, 1, d_model]
-        
-        if activations is not None:
-            activations[f'layer_{layer_idx}_KV_sum'] = KV_sum.copy()
-        
-        attn_spikes, _ = self.spike_layers[f'layer_{layer_idx}_attn'].forward(KV_sum, timestep)
+        for i in range(seq_len):
+            cumulative_kv += K_spikes[:, i, :] * V_spikes[:, i, :]
+            attn_output = Q_spikes[:, i, :] * cumulative_kv
+            attn_spikes, _ = self.spike_layers[f'layer_{layer_idx}_attn'].forward(
+                attn_output[:, np.newaxis, :], timestep
+            )
+            output[:, i, :] = attn_spikes[:, 0, :]
+            if activations is not None:
+                cumulative_kv_states[i] = cumulative_kv
+                attn_outputs[i] = attn_output
         
         if activations is not None:
-            activations[f'layer_{layer_idx}_attn_spikes'] = attn_spikes.copy()
-        
-        # Apply attention to values
-        attn_output_spikes = V_spikes * attn_spikes
-        
-        if activations is not None:
-            activations[f'layer_{layer_idx}_attn_output_spikes'] = attn_output_spikes.copy()
-        
-        # Output projection
-        return np.matmul(attn_output_spikes, layer['W_o'])
+            activations[f'layer_{layer_idx}_Q_membrane'] = Q_membrane
+            activations[f'layer_{layer_idx}_K_membrane'] = K_membrane
+            activations[f'layer_{layer_idx}_V_membrane'] = V_membrane
+            activations[f'layer_{layer_idx}_Q_spikes'] = Q_spikes
+            activations[f'layer_{layer_idx}_K_spikes'] = K_spikes
+            activations[f'layer_{layer_idx}_V_spikes'] = V_spikes
+            activations[f'layer_{layer_idx}_cumulative_kv_states'] = cumulative_kv_states
+            activations[f'layer_{layer_idx}_attn_outputs'] = attn_outputs
+            activations[f'layer_{layer_idx}_attn_output_spikes'] = output
+
+        return np.matmul(output, layer['W_o'])
     
     def spike_driven_feed_forward(self, x: np.ndarray, layer: Dict, layer_idx: int,
                                      timestep: int, activations: Dict = None):
@@ -492,9 +610,10 @@ class SpikeLLM():
             probs[:, i, :] = self.softmax(logits[:, i, :], axis=-1)
         
         grad_logits = probs.copy()
+        pad_token_id = self.token_to_idx['<PAD>']
         for b in range(batch_size):
             for i in range(seq_len):
-                if target_ids[b, i] != self.char_to_idx['<PAD>']:
+                if target_ids[b, i] != pad_token_id:
                     grad_logits[b, i, target_ids[b, i]] -= 1.0
                 else:
                     grad_logits[b, i, :] = 0.0
@@ -603,38 +722,49 @@ class SpikeLLM():
                 grad_attn_output = grad_attn_residual
                 grad_layer_input = grad_attn_residual
                 
-                # === Backward through attention output projection ===
+
                 attn_output_spikes = activations[f'layer_{i}_attn_output_spikes']
-                
+
                 grad_attn_flat = grad_attn_output.reshape(-1, self.d_model)
                 attn_spikes_flat = attn_output_spikes.reshape(-1, self.d_model)
-                
+
                 grad_W_o = np.matmul(attn_spikes_flat.T, grad_attn_flat)
                 grads[f'layer_{i}_W_o'] += grad_W_o
-                
+
                 grad_attn_output_spikes = np.matmul(grad_attn_output, layer['W_o'].T)
-                
-                # === Backward through spike-driven attention ===
-                V_spikes = activations[f'layer_{i}_V_spikes']
-                attn_spikes = activations[f'layer_{i}_attn_spikes']
-                
-                # Gradient w.r.t V_spikes
-                grad_V_spikes = grad_attn_output_spikes * attn_spikes
-                
-                # Gradient w.r.t attn_spikes
-                grad_attn_spikes = np.sum(grad_attn_output_spikes * V_spikes, axis=2, keepdims=True)
-                
-                # Backward through attention spike generation
-                KV_sum = activations[f'layer_{i}_KV_sum']
-                spike_grad_attn = self.surrogate_gradient(KV_sum, SPIKE_THRESH_ATTN)
-                grad_KV_sum = grad_attn_spikes * spike_grad_attn
-                
-                grad_KV_hadamard = np.broadcast_to(grad_KV_sum, (batch_size, seq_len, self.d_model))
-                
-                # Gradients for K and V spikes
+
+                # === Backward through linear attention ===
+                Q_spikes = activations[f'layer_{i}_Q_spikes']
                 K_spikes = activations[f'layer_{i}_K_spikes']
-                grad_K_spikes = grad_KV_hadamard * V_spikes
-                grad_V_spikes += grad_KV_hadamard * K_spikes
+                V_spikes = activations[f'layer_{i}_V_spikes']
+                cumulative_kv_states = activations[f'layer_{i}_cumulative_kv_states']
+                attn_outputs = activations[f'layer_{i}_attn_outputs']
+
+                # Initialize gradients
+                grad_Q_spikes = np.zeros_like(Q_spikes)
+                grad_K_spikes = np.zeros_like(K_spikes)
+                grad_V_spikes = np.zeros_like(V_spikes)
+
+                # Backward through each timestep in reverse
+                for pos in reversed(range(seq_len)):
+                    # Gradient from output spike generation
+                    attn_output = attn_outputs[pos]
+                    spike_grad_attn = self.surrogate_gradient(
+                        attn_output[:, np.newaxis, :], SPIKE_THRESH_ATTN
+                    )
+                    grad_attn_at_pos = grad_attn_output_spikes[:, pos, :] * spike_grad_attn[:, 0, :]
+                    
+                    # Gradient w.r.t query at position pos
+                    cumulative_kv = cumulative_kv_states[pos]
+                    grad_Q_spikes[:, pos, :] = grad_attn_at_pos * cumulative_kv
+                    
+                    # Gradient w.r.t cumulative_kv
+                    grad_cumulative_kv = grad_attn_at_pos * Q_spikes[:, pos, :]
+                    
+                    # Distribute gradient to all previous K and V positions
+                    for j in range(pos + 1):
+                        grad_K_spikes[:, j, :] += grad_cumulative_kv * V_spikes[:, j, :]
+                        grad_V_spikes[:, j, :] += grad_cumulative_kv * K_spikes[:, j, :]
                 
                 # Convert spike gradients to membrane gradients
                 Q_membrane = activations[f'layer_{i}_Q_membrane']
@@ -646,7 +776,7 @@ class SpikeLLM():
                 spike_grad_V = self.surrogate_gradient(V_membrane, SPIKE_THRESH_V)
                 
                 # Note: Q gradient comes from being unused in SDSA-1 architecture
-                grad_Q_membrane = np.zeros_like(Q_membrane)  # Q is not used in output
+                grad_Q_membrane = grad_Q_spikes * spike_grad_Q
                 grad_K_membrane = grad_K_spikes * spike_grad_K
                 grad_V_membrane = grad_V_spikes * spike_grad_V
                 
@@ -678,10 +808,11 @@ class SpikeLLM():
             grad_embed = grad_embed_with_pos  # Positional encoding is fixed
             
             # Accumulate embedding gradients
+            pad_token_id = self.token_to_idx['<PAD>']
             for b in range(batch_size):
                 for i in range(seq_len):
                     token_idx = input_ids[b, i]
-                    if token_idx != self.char_to_idx['<PAD>']:
+                    if token_idx != pad_token_id:
                         grads[f'embedding_{token_idx}'] += grad_embed[b, i, :]
         
         # ============ UPDATE PARAMETERS ============
@@ -720,17 +851,15 @@ class SpikeLLM():
     
     def generate(self, prompt: str, max_length: int = 100, temperature: float = 1.0) -> str:
         """Generate text given a prompt using the trained model"""
-        # Tokenize prompt
-        tokens = [self.char_to_idx.get(c, self.char_to_idx['<UNK>']) for c in prompt]
-        tokens = [self.char_to_idx['<START>']] + tokens
-        
-        generated = prompt
+        # Tokenize prompt using the smart tokenizer
+        tokens = self.tokenizer.tokenize(prompt)
+        tokens = [self.token_to_idx['<START>']] + tokens
         
         for _ in range(max_length):
             # Prepare input (pad if necessary)
             input_tokens = tokens[-self.max_seq_len:]
             if len(input_tokens) < self.max_seq_len:
-                input_tokens = input_tokens + [self.char_to_idx['<PAD>']] * (self.max_seq_len - len(input_tokens))
+                input_tokens = input_tokens + [self.token_to_idx['<PAD>']] * (self.max_seq_len - len(input_tokens))
             
             input_ids = np.array([input_tokens])
             
@@ -745,29 +874,22 @@ class SpikeLLM():
             next_token = np.random.choice(self.vocab_size, p=probs)
             
             # Stop if END token
-            if next_token == self.char_to_idx['<END>']:
+            if next_token == self.token_to_idx['<END>']:
                 break
             
             # Add to sequence
             tokens.append(next_token)
-            if next_token != self.char_to_idx['<PAD>']:
-                generated += self.idx_to_char[next_token]
         
-        return generated
+        # Decode using tokenizer (excluding START token)
+        generated_tokens = [t for t in tokens[1:] if t != self.token_to_idx['<PAD>']]
+        return self.tokenizer.decode(generated_tokens)
 
     def preprocess_text(self, text: str) -> List[int]:
-        """Convert text to token indices with proper handling of unknown characters"""
-        tokens = []
-        for char in text:
-            if char in self.char_to_idx:
-                tokens.append(self.char_to_idx[char])
-            else:
-                # Use PAD token for unknown characters
-                tokens.append(self.char_to_idx['<PAD>'])
-        return tokens
+        """Convert text to token indices using the syllable tokenizer"""
+        return self.tokenizer.tokenize(text)
     
     def create_training_batch(self, texts: List[str], batch_size: int = 8):
-        """Create batches of training data"""
+        """Create batches of training data using the new tokenizer"""
         batch_x = []
         batch_y = []
         
@@ -776,13 +898,13 @@ class SpikeLLM():
             
             for text in batch_texts:
                 # Tokenize with START and END tokens
-                tokens = [self.char_to_idx['<START>']]
-                tokens += self.preprocess_text(text[:self.max_seq_len-2])
-                tokens += [self.char_to_idx['<END>']]
+                tokens = [self.token_to_idx['<START>']]
+                tokens += self.preprocess_text(text[:self.max_seq_len-2])  # Leave room for START/END
+                tokens += [self.token_to_idx['<END>']]
                 
                 # Pad to max_seq_len
                 while len(tokens) < self.max_seq_len:
-                    tokens.append(self.char_to_idx['<PAD>'])
+                    tokens.append(self.token_to_idx['<PAD>'])
                 
                 # Truncate if necessary
                 tokens = tokens[:self.max_seq_len]
@@ -802,7 +924,7 @@ class SpikeLLM():
                           batch_size: int = 8,
                           chunks_per_epoch: int = 1000,
                           checkpoint_dir: str = './checkpoints',
-                          save_interval: int = 5):
+                          save_interval: int = 20):
         """Train on Wikipedia dataset with proper batching and checkpointing"""
         
         # Create checkpoint directory
@@ -862,10 +984,10 @@ class SpikeLLM():
             
             # Generate sample
             if (epoch + 1) % LOG_INTERVAL == 0:
-                prompts = ["The ", "In ", "A ", "Wikipedia "]
+                prompts = ["The capital of France is", "What", "A", "When was"]
                 for prompt in prompts:
                     generated = self.generate(prompt, max_length=100, temperature=0.8)
-                    print(f"Sample '{prompt}': {generated[:200]}...")
+                    print(f"Sample '{prompt}': {generated[:200]}")
             
             # Save checkpoint
             if (epoch + 1) % save_interval == 0:
@@ -889,6 +1011,7 @@ class SpikeLLM():
                 'adam_v': self.adam_v,
                 'adam_t': self.adam_t
             },
+            'tokenizer': self.tokenizer,
             'training_history': self.training_history,
             'config': {
                 'max_seq_len': self.max_seq_len,
@@ -912,6 +1035,13 @@ class SpikeLLM():
         
         with open(checkpoint_path, 'rb') as f:
             checkpoint = pickle.load(f)
+
+        if 'tokenizer' in checkpoint:
+            self.tokenizer = checkpoint['tokenizer']
+            self.vocab = self.tokenizer.vocab
+            self.vocab_size = len(self.vocab)
+            self.token_to_idx = self.tokenizer.vocab_to_id
+            self.idx_to_token = self.tokenizer.id_to_vocab
         
         # Restore model parameters
         self.embedding = checkpoint['model_params']['embedding']
@@ -930,37 +1060,57 @@ class SpikeLLM():
         
         print(f"Loaded checkpoint from epoch {checkpoint['epoch']}")
 
+def initialize_tokenizer(tokenizer_path: str = None):
+    print(f"Loading tokenizer from {tokenizer_path}")
+    with open(tokenizer_path, 'rb') as f:
+        tokenizer = pickle.load(f)
+
+    print("=== VOCABULARY CHECK ===")
+    print(f"'<UNK>' in vocab_to_id: {'<UNK>' in tokenizer.vocab_to_id}")
+    print(f"UNK in any vocab tokens: {any('UNK' in token for token in tokenizer.vocab)}")
+    print(f"Vocab size: {len(tokenizer.vocab)}")
+    print(f"First 20 tokens: {tokenizer.vocab[:20]}")
+
+    # Check if any ID maps to UNK
+    unk_ids = [id for id, token in tokenizer.id_to_vocab.items() if 'UNK' in str(token)]
+    print(f"IDs that map to UNK: {unk_ids}")
+    
+    return tokenizer
+
 if __name__ == "__main__":
-    WIKIPEDIA_JSON_PATH = "wikipedia_top_articles.json"
+    WIKIPEDIA_DATA_FOLDER = "scraped_data"
+    TOKENIZER_PATH = 'syllable_tokenizer.pkl'
     
     if TRAIN_MODEL:
-        # Initialize data loader
+        tokenizer = initialize_tokenizer(TOKENIZER_PATH)
         data_loader = WikipediaDataLoader(
-            json_path=WIKIPEDIA_JSON_PATH,
-            max_article_length=10000,
-            chunk_size=512,
-            overlap=64
+            data_folder=WIKIPEDIA_DATA_FOLDER,
+            max_article_length=100000,
+            chunk_size=2048,
+            overlap=64,
+            tokenizer=tokenizer
         )
-        
-        # Load and process data
         data_loader.load_articles()
         data_loader.create_chunks()
-        
-        # Initialize model
-        model = SpikeLLM()
-        
-        # Train model
+        model = SpikeLLM(tokenizer=tokenizer)
+        print(f"Tokenizer vocab size: {len(model.tokenizer.vocab)}")
+        print(f"Tokenizer max ID: {max(model.tokenizer.id_to_vocab.keys())}")
+        print(f"Embedding size: {model.embedding.shape}")
         model.train_on_wikipedia(
             data_loader=data_loader,
             epochs=EPOCHS,
-            batch_size=8,
-            chunks_per_epoch=1000,
+            batch_size=32,
+            chunks_per_epoch=5000,
             checkpoint_dir=SAVE_FILEPATH,
-            save_interval=5
+            save_interval=1
         )
+        embedding1 = model.get_text_embedding("The capital of France")
+        embedding2 = model.get_text_embedding("Paris is a city") 
+        similarity = np.dot(embedding1, embedding2)
+        print(f"Similarity: {similarity}")
     else:
         # Load and test model
-        model = SpikeLLM()
+        model = SpikeLLM(tokenizer_path='tokenizer.pkl')
         checkpoint_path = os.path.join(SAVE_FILEPATH, 'spike_llm_epoch_10.pkl')
         if os.path.exists(checkpoint_path):
             model.load_checkpoint(checkpoint_path)
@@ -971,3 +1121,8 @@ if __name__ == "__main__":
                 generated = model.generate(prompt, max_length=200, temperature=0.8)
                 print(f"\nPrompt: '{prompt}'")
                 print(f"Generated: {generated}")
+                
+                # Show tokenization analysis
+                analysis = model.tokenizer.analyze_compression(generated)
+                print(f"Compression ratio: {analysis['compression_ratio']:.2f}x")
+                print(f"Space savings: {analysis['savings_percentage']:.1f}%")

@@ -1,5 +1,6 @@
 import json
 from collections import Counter
+import pickle
 import re
 import heapq
 from typing import List, Tuple, Dict, Set
@@ -192,33 +193,43 @@ class SmartNgramTokenizer:
             'ngram_usage': ngram_usage.most_common(20)
         }
 
-
-def process_and_select_ngrams(filename: str, base_vocab: List[str], 
+def process_and_select_ngrams(folder_path: str, base_vocab: List[str], 
                              max_ngrams: int = 10000,
                              min_frequency: int = 100) -> SmartNgramTokenizer:
     """
-    Process Wikipedia JSON and select optimal n-grams for tokenization.
+    Process Wikipedia JSON files from folder and select optimal n-grams for tokenization.
     """
-    # First, get n-gram statistics (reusing previous function)
+    import os
     from collections import Counter
     
     ngram_counters = {2: Counter(), 3: Counter(), 4: Counter(), 5: Counter(), 6: Counter(), 7: Counter(), 8: Counter(), 9: Counter(), 10: Counter()}
     
-    with open(filename, 'r', encoding='utf-8') as f:
-        articles = json.load(f)
+    # Get all JSON files from the folder
+    json_files = [f for f in os.listdir(folder_path) if f.endswith('.json')]
     
-    print("Extracting n-grams from articles...")
-    for i, article in enumerate(articles):
-        content = article.get('content', '').lower()
-        content = re.sub(r'\s+', ' ', content)
+    print(f"Found {len(json_files)} JSON files to process")
+    
+    total_articles = 0
+    for file_idx, json_file in enumerate(json_files):
+        file_path = os.path.join(folder_path, json_file)
+        print(f"\nProcessing {json_file} ({file_idx + 1}/{len(json_files)})...")
         
-        for n in [2, 3, 4, 5, 6, 7, 8, 9]:
-            for j in range(len(content) - n + 1):
-                ngram = content[j:j + n]
-                ngram_counters[n][ngram] += 1
-        
-        if (i + 1) % 100 == 0:
-            print(f"Processed {i + 1} articles...")
+        with open(file_path, 'r', encoding='utf-8') as f:
+            articles = json.load(f)
+            for i, article in enumerate(articles):
+                total_articles += 1
+                content = article.get('content', '').lower()
+                content = re.sub(r'\s+', ' ', content)
+                
+                for n in [2, 3, 4, 5, 6, 7, 8, 9]:
+                    for j in range(len(content) - n + 1):
+                        ngram = content[j:j + n]
+                        ngram_counters[n][ngram] += 1
+                
+                if (i + 1) % 100 == 0:
+                    print(f"  Processed {i + 1} articles from {json_file}...")
+    
+    print(f"\nTotal articles processed: {total_articles}")
     
     # Create tokenizer and select n-grams
     print("\nSelecting optimal n-grams...")
@@ -282,8 +293,9 @@ def main():
     ]
     
     # Process Wikipedia data and create tokenizer
+
     tokenizer, selected_ngrams = process_and_select_ngrams(
-        'wikipedia_top_articles.json',
+        'scraped_data',  # Changed to folder path
         base_vocab,
         max_ngrams=10000,
         min_frequency=100
@@ -298,6 +310,11 @@ def main():
         f.write("="*50 + "\n\n")
         for i, (ngram, freq, compression) in enumerate(selected_ngrams):
             f.write(f"{i+1}. {repr(ngram)}: freq={freq:,}, compression_value={compression:,.0f}\n")
+    
+    print("Saving tokenizer as pickle file...")
+    with open('tokenizer.pkl', 'wb') as f:
+        pickle.dump(tokenizer, f)
+    print("Tokenizer saved as 'tokenizer.pkl'")
     
     # Test the tokenizer
     test_texts = [
